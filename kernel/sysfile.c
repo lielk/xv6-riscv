@@ -165,6 +165,9 @@ bad:
   return -1;
 }
 
+
+
+
 // Is the directory dp empty except for "." and ".." ?
 static int
 isdirempty(struct inode *dp)
@@ -241,6 +244,7 @@ bad:
 static struct inode*
 create(char *path, short type, short major, short minor)
 {
+  //printf("create%d\n",type);
   struct inode *ip, *dp;
   char name[DIRSIZ];
 
@@ -249,12 +253,20 @@ create(char *path, short type, short major, short minor)
 
   ilock(dp);
 
+//if the file already exsist we want to add the case of the T_SYLINK ad return it
   if((ip = dirlookup(dp, name, 0)) != 0){
+    //printf(">>>>");
     iunlockput(dp);
     ilock(ip);
+    
     if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
       return ip;
+    if(type == T_SYMLINK){
+      //printf("create link");
+      return ip;
+    }
     iunlockput(ip);
+
     return 0;
   }
 
@@ -284,6 +296,109 @@ create(char *path, short type, short major, short minor)
 }
 
 uint64
+sys_symlink(void)
+{
+char oldPathToWrite[MAXPATH];
+char newPathForInode[MAXPATH];
+memset(oldPathToWrite,0,sizeof(oldPathToWrite));
+
+if((argstr(0, oldPathToWrite, MAXPATH)) < 0 || (argstr(1, newPathForInode, MAXPATH)) < 0)
+    return -1;
+if(namei(newPathForInode) != 0){ 
+    return -1;
+  }
+begin_op();
+struct inode *ip = create(newPathForInode,T_SYMLINK,0,0);
+if(!ip){
+  end_op();
+  return -1;
+}
+//ip->type= T_SYMLINK;
+if(writei(ip,0,(uint64)oldPathToWrite,0,MAXPATH)!=MAXPATH){
+  
+return -1;
+}
+
+iunlockput(ip);
+end_op();
+
+return 0;
+}
+
+
+
+//--------------------------------------------------------------
+
+
+uint64 copy_buf_to_proc(char * res,uint64 buffersize,uint64 addr){
+struct proc *curProck = myproc(); //GET THE PAGE TABLE AND COPPY TO THE ADRRES WE GOT FROM THE CLIENT THE BUFFER WE READ
+
+
+uint64 r = copyout(curProck->pagetable,addr,res,buffersize);
+if(r<0){
+return -1;
+}
+return 0;
+}
+
+uint64
+sys_readlink(void)
+{
+
+char path[MAXPATH];
+if(argstr(0,path,MAXPATH)<0){
+return -1;
+}
+
+int buffersize;
+if(argint(2,&buffersize)<0){
+return -1;
+}
+
+uint64 addr;
+if(argaddr(1,&addr)<0){
+return -1;
+}
+
+
+begin_op();
+
+struct inode* ip=namei(path);
+if(!ip){
+  end_op();
+  return -1;
+}
+
+ilock(ip);
+if(ip->type!=T_SYMLINK){
+    iunlock(ip);
+
+  end_op();
+  return -1;
+}
+if( buffersize < ip->size ){
+  iunlock(ip);
+  end_op();
+  return -1;
+}
+char res[buffersize];
+
+ readi(ip,0,(uint64)res,0,ip->size);//READ THE INODE TO THE RES BUFFER 
+
+if(copy_buf_to_proc(res,buffersize,addr)<0){
+  return -1;
+  iunlock(ip);
+  end_op();
+}
+
+iunlock(ip);
+end_op();
+return 0;
+}
+
+
+
+uint64
 sys_open(void)
 {
   char path[MAXPATH];
@@ -291,13 +406,14 @@ sys_open(void)
   struct file *f;
   struct inode *ip;
   int n;
+  
 
   if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)
     return -1;
 
   begin_op();
 
-  if(omode & O_CREATE){
+  if(omode & O_CREATE){ 
     ip = create(path, T_FILE, 0, 0);
     if(ip == 0){
       end_op();
@@ -309,19 +425,31 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
+    
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
       return -1;
     }
   }
+//this section got us the inode so now we can check the flag
+
 
   if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
     iunlockput(ip);
     end_op();
     return -1;
   }
+// 
+//------------------------------------------------------------
+  if(!(omode & O_NOFOLLOW)){
+    ip = go_until_no_sylink(ip,MAX_DEREFERENCE); // if the flag is not on we wnat got the inod that not is T_SYMLINK type
+    if(ip == 0){//if error ocured (we donot got the ip)
 
+      return -1;
+    }
+  }
+//------------------------------------------------------
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
     if(f)
       fileclose(f);
@@ -400,10 +528,17 @@ sys_chdir(void)
     return -1;
   }
   ilock(ip);
-  if(ip->type != T_DIR){
+  if(ip->type!=T_SYMLINK&& ip->type != T_DIR){
     iunlockput(ip);
     end_op();
     return -1;
+  }
+  if(ip->type == T_SYMLINK){
+    
+    if(!(go_until_no_sylink(ip,MAX_DEREFERENCE))){
+      end_op();
+      return -1;
+    }
   }
   iunlock(ip);
   iput(p->cwd);
@@ -412,9 +547,12 @@ sys_chdir(void)
   return 0;
 }
 
+
+
 uint64
 sys_exec(void)
-{
+{       
+
   char path[MAXPATH], *argv[MAXARG];
   int i;
   uint64 uargv, uarg;
@@ -440,6 +578,27 @@ sys_exec(void)
     if(fetchstr(uarg, argv[i], PGSIZE) < 0)
       goto bad;
   }
+
+
+  struct inode * ip = namei(path);
+  if(ip==0){
+    printf("faileddd , %s",path);
+    goto bad;
+  }
+
+     ilock(ip);
+     //if we exececute a file type of T_SYMLINK we want to get and execute the inode that not T_SYMLYNK
+     if(ip->type == T_SYMLINK){
+       //printf("dddddccd");
+       if(go_until_no_sylink_exec(ip,MAX_DEREFERENCE,path)==0){
+         end_op();
+         return -1;
+       }
+      //not need to unnlock because i uncloke it in the function
+     }
+     else{
+       iunlock(ip);
+     }
 
   int ret = exec(path, argv);
 

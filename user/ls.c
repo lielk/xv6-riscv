@@ -1,6 +1,7 @@
 #include "kernel/types.h"
 #include "kernel/stat.h"
 #include "user/user.h"
+ #include "kernel/fcntl.h"
 #include "kernel/fs.h"
 
 char*
@@ -22,6 +23,25 @@ fmtname(char *path)
   return buf;
 }
 
+
+
+char*
+fmtnameMy(char *path)
+{
+  static char buf[DIRSIZ+1];
+  char *p;
+
+  // Find first character after last slash.
+  for(p=path+strlen(path); p >= path && *p != '/'; p--)
+    ;
+  p++;
+
+  // Return blank-padded name.
+  if(strlen(p) >= DIRSIZ)
+    return p;
+  memmove(buf, p, strlen(p));
+  return buf;
+}
 void
 ls(char *path)
 {
@@ -29,8 +49,15 @@ ls(char *path)
   int fd;
   struct dirent de;
   struct stat st;
-
-  if((fd = open(path, 0)) < 0){
+  char Tbuf[512];
+  struct stat ST;
+     if((strcmp(path,".") == 0 || strcmp(path,"..") == 0))
+     {
+       fd = open(path,O_RDONLY);
+     }else{
+       fd = open(path,O_RDONLY | O_NOFOLLOW);
+     }
+  if(fd  < 0){
     fprintf(2, "ls: cannot open %s\n", path);
     return;
   }
@@ -42,6 +69,12 @@ ls(char *path)
   }
 
   switch(st.type){
+
+  case T_SYMLINK: // if its T_SYMLINK
+    readlink(path,Tbuf,512);
+    stat(buf,&ST);
+    printf("%s  -> %s %d %d 0\n",fmtname(buf),st.type, st.ino, st.size );
+    
   case T_FILE:
     printf("%s %d %d %l\n", fmtname(path), st.type, st.ino, st.size);
     break;
@@ -63,12 +96,28 @@ ls(char *path)
         printf("ls: cannot stat %s\n", buf);
         continue;
       }
-      printf("%s %d %d %d\n", fmtname(buf), st.type, st.ino, st.size);
-    }
+      //--------------------------------------------------------------------
+      if(st.type == T_SYMLINK)
+      {
+
+        
+        readlink(buf, Tbuf, 512);
+        stat(Tbuf, &ST);
+
+        printf("%s->./%s        %d %d %d\n", fmtnameMy(buf), Tbuf, ST.type, ST.ino,0);
+      }
+      else
+      {
+        printf("%s %d %d %d\n", fmtname(buf), st.type, st.ino, st.size);
+      }    
+      //--------------------------------------------------------------------
+      
+      }
     break;
   }
   close(fd);
 }
+
 
 int
 main(int argc, char *argv[])

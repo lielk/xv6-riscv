@@ -401,6 +401,38 @@ bmap(struct inode *ip, uint bn)
     return addr;
   }
 
+    bn -= NINDIRECT;
+
+    if(bn < DNINDIRECT)
+    {
+
+      if((addr = ip->addrs[NDIRECT + 1])==0){
+        ip->addrs[NDIRECT + 1] = addr  = balloc(ip -> dev);
+        
+      }
+      bp = bread(ip->dev ,addr);
+      a = (uint*)bp->data;
+      if((addr = a[bn / NINDIRECT])==0){ //first level
+        a[bn/NINDIRECT] = addr = balloc(ip->dev);
+        log_write(bp);
+      }
+      brelse(bp);
+      bp = bread(ip->dev,addr);
+      a = (uint*)bp->data;
+      if((addr = a[bn % NINDIRECT])==0) //seconde level
+      {
+        a[bn%NINDIRECT] = addr = balloc(ip->dev);
+        log_write(bp);
+      }
+      brelse(bp);
+      return addr;
+
+
+
+
+    }
+
+
   panic("bmap: out of range");
 }
 
@@ -672,3 +704,59 @@ nameiparent(char *path, char *name)
 {
   return namex(path, 1, name);
 }
+
+struct inode*
+go_until_no_sylink(struct inode * ip,int max){
+    
+      struct inode* ip_result = ip;
+
+      char buffer[256];
+
+
+      while(max>0){
+        if(ip_result->type !=T_SYMLINK){
+        return ip_result;
+      }
+        readi(ip,0, (uint64)buffer, 0, ip_result->size);
+        iunlockput(ip_result);
+        ip_result = namei(buffer);
+        ilock(ip_result);
+        max--;
+      }
+      if(ip_result->type !=T_SYMLINK){
+        return ip_result;
+      }
+      else{
+        iunlockput(ip_result);
+        return 0;
+      }
+    
+  }
+//get the path in the last _TSYMLINK
+//the path we coppy to the path variable we go as a parameter
+  struct inode*
+go_until_no_sylink_exec(struct inode * ip,int max,char* path){
+    
+      struct inode* ip_result = ip;
+
+      while(max>0){
+        if(ip_result->type !=T_SYMLINK){
+          iunlockput(ip_result);
+        return ip_result;
+      }
+        readi(ip,0, (uint64)path, 0, ip_result->size);
+        iunlockput(ip_result);
+        ip_result = namei(path);
+        ilock(ip_result);
+        max--;
+      }
+      if(ip_result->type !=T_SYMLINK){
+        iunlockput(ip_result);
+        return ip_result;
+      }
+      else{
+        iunlockput(ip_result);
+        return 0;
+      }
+    
+  }
